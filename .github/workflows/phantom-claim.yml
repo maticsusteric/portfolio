@@ -1,0 +1,108 @@
+name: Phantom claim
+
+# A solver opens an issue from the trophy room. This checks out the private source
+# (maticsusteric/portfolio-src), verifies the proof for the issue's author, commits the dog tag
+# to the source's src/data/phantoms.json and answers on the issue. That push makes
+# portfolio-src trigger a deploy. The repo owner can also comment `/verify-dice` (or
+# `/verify-dice revoke`) on a claim issue to grant the DICE tag after checking the claimer by hand.
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: phantom-claim
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.event_name == 'issues' && contains(github.event.issue.body, '<!-- phantom-claim')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: maticsusteric/portfolio-src
+          ref: master
+          token: ${{ secrets.SOURCE_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Issue text goes in through env, never interpolated into the script.
+      - id: verify
+        run: node scripts/phantom/verify-claim.mjs
+        env:
+          PHANTOM_ANSWERS: ${{ secrets.PHANTOM_ANSWERS }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - if: steps.verify.outputs.result == 'accepted'
+        env:
+          AUTHOR: ${{ github.event.issue.user.login }}
+        run: |
+          git config user.name "phantom-program[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/data/phantoms.json
+          git commit -m "Phantom dog tag: @$AUTHOR"
+          git pull --rebase origin master
+          git push origin HEAD:master
+      - uses: actions/github-script@v7
+        env:
+          MESSAGE: ${{ steps.verify.outputs.message }}
+          RESULT: ${{ steps.verify.outputs.result }}
+        with:
+          script: |
+            const issue = { ...context.repo, issue_number: context.issue.number }
+            await github.rest.issues.createComment({ ...issue, body: process.env.MESSAGE })
+            await github.rest.issues.update({
+              ...issue,
+              state: 'closed',
+              state_reason: process.env.RESULT === 'accepted' ? 'completed' : 'not_planned',
+            })
+
+  # Manual DICE / EA verification: only the repo owner's comment counts.
+  verify-dice:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      startsWith(github.event.comment.body, '/verify-dice') &&
+      github.event.comment.author_association == 'OWNER' &&
+      contains(github.event.issue.body, '<!-- phantom-claim')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: maticsusteric/portfolio-src
+          ref: master
+          token: ${{ secrets.SOURCE_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: dice
+        run: node scripts/phantom/verify-dice.mjs
+        env:
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          COMMENT: ${{ github.event.comment.body }}
+      - if: steps.dice.outputs.result == 'updated'
+        env:
+          AUTHOR: ${{ github.event.issue.user.login }}
+        run: |
+          git config user.name "phantom-program[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/data/phantoms.json
+          git commit -m "DICE dog tag: @$AUTHOR"
+          git pull --rebase origin master
+          git push origin HEAD:master
+      - uses: actions/github-script@v7
+        env:
+          MESSAGE: ${{ steps.dice.outputs.message }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: context.issue.number,
+              body: process.env.MESSAGE,
+            })
